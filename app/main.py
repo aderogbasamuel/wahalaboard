@@ -1,12 +1,14 @@
-from fastapi import FastAPI, Depends
-from pydantic import BaseModel, Field, field_validator
+from fastapi import FastAPI, Depends, HTTPException
+from pydantic import BaseModel, Field, field_validator, EmailStr
 from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.db.models import Poll, User, PollOption
 from pwdlib import PasswordHash
-pasword_haser= PasswordHash.recommended
+
+
+pasword_haser= PasswordHash.recommended()
 
 app= FastAPI(
     title= "Wahala Board Api",
@@ -14,9 +16,9 @@ app= FastAPI(
     version= "0.1.0"
 )
 class UserCreate(BaseModel):
-    username: str=Field(min_length=2, max_length=200)
-    email: str=Field(min_length=2, max_length=200)
-    password: str=Field(min_length=6, max_length=200)
+    username: str=Field(min_length=2, max_length=50)
+    email: EmailStr
+    password: str=Field(min_length=6, max_length=128)
 
 
 class PollCreate(BaseModel):
@@ -40,8 +42,18 @@ class PollCreate(BaseModel):
 
         return cleaned_options
 
-@app.post("/api/v1/user", status_code=201)
-def create_user(user: UserCreate, db: Session= Depends(get_db)):
+@app.post("/api/v1/register", status_code=201)
+def register_user(user: UserCreate, db: Session= Depends(get_db)):
+    existing_user= db.scalar(
+        select(User).where(
+            (User.email==user.email)| (User.username== user.username)
+        )
+    )
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            details="Email or username is already registered"
+        )
     new_user=User(
         username=user.username.strip(),
         email= user.email.strip().lower(),
@@ -52,9 +64,11 @@ def create_user(user: UserCreate, db: Session= Depends(get_db)):
     db.refresh(new_user)
 
     return {
-        "id": new_user.id,
-        "username": new_user.username,
-        "email": new_user.email,
+        "user":{
+            "id": new_user.id,
+            "username": new_user.username,
+            "email": new_user.email,
+        },
         "message": "User created successfully",
     }
     
