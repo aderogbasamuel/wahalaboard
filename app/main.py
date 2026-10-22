@@ -1,3 +1,7 @@
+import os
+from datetime import datetime, timedelta, timezone
+
+import jwt
 from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator, EmailStr
 from uuid import uuid4
@@ -6,10 +10,46 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.db.models import Poll, User, PollOption
 from pwdlib import PasswordHash
+from fastapi.security import OAuth2PasswordBearer
+from jwt.exceptions import InvalidTokenError
 
+password_haser= PasswordHash.recommended()
+JWT_SECRET_KEY=  os.getenv("JWT_SECRET_KEY")
 
-pasword_haser= PasswordHash.recommended()
+if not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY is not configured")
 
+JWT_ALGORITHM="HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES=120
+oauth2_scheme=OAuth2PasswordBearer(
+    tokenUrl="/api/v1/auth/login"
+)
+def create_access_token(user_id: int)-> str:
+    now= datetime.now(timezone.utc)
+
+    payload={
+        "sub": str(user_id),
+        "iat": now,
+        "exp": now+timedelta(
+            minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+        )
+    }
+
+    return jwt.encode(
+        payload, 
+        JWT_SECRET_KEY,
+        algorithm= JWT_ALGORITHM
+    )
+
+def get_current_user(
+        token: str= Depends(oauth2_scheme),
+        db: Session= Depends(get_db),
+)-> User: 
+    credentials_exception= HTTPException(
+        status_code=401,
+        detail= "Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 app= FastAPI(
     title= "Wahala Board Api",
     description="A place to settle everyday debates",
@@ -20,6 +60,9 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str=Field(min_length=6, max_length=128)
 
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
 
 class PollCreate(BaseModel):
     question: str=Field(min_length=5, max_length=200)
@@ -42,7 +85,7 @@ class PollCreate(BaseModel):
 
         return cleaned_options
 
-@app.post("/api/v1/register", status_code=201)
+@app.post("/api/v1/auth/register", status_code=201)
 def register_user(user: UserCreate, db: Session= Depends(get_db)):
     existing_user= db.scalar(
         select(User).where(
@@ -57,7 +100,7 @@ def register_user(user: UserCreate, db: Session= Depends(get_db)):
     new_user=User(
         username=user.username.strip(),
         email= user.email.strip().lower(),
-        password= pasword_haser.hash(user.password), 
+        password= password_haser.hash(user.password), 
     )
     db.add(new_user)
     db.commit()
@@ -71,7 +114,32 @@ def register_user(user: UserCreate, db: Session= Depends(get_db)):
         },
         "message": "User created successfully",
     }
-    
+
+@app.post("/api/v1/auth/login")
+def login_user(
+    credentials: UserLogin, 
+    db: Session= Depends(get_db)
+):
+    user=db.scalar(
+        select(User).where(User.email==credentials.email)
+    )
+
+    if user is None or not password_haser.verify(
+        credentials.password,
+        user.password
+    ): raise HTTPException(
+        status_code=401,
+        detail= "INvalid email or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    access_token= create_access_token(user.id)
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    }
 @app.post("/api/v1/polls", status_code= 201)
 def create_poll(poll:PollCreate, db: Session= Depends(get_db)):
     new_poll=Poll(question=poll.question)
