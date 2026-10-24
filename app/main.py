@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.db.session import get_db
 from app.db.models import Poll, User, PollOption
 from pwdlib import PasswordHash
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jwt.exceptions import InvalidTokenError
 
 password_haser= PasswordHash.recommended()
@@ -21,9 +21,11 @@ if not JWT_SECRET_KEY:
 
 JWT_ALGORITHM="HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES=120
-oauth2_scheme=OAuth2PasswordBearer(
-    tokenUrl="/api/v1/auth/login"
-)
+# oauth2_scheme=OAuth2PasswordBearer(
+#     tokenUrl="/api/v1/auth/login"
+# )
+
+bearer_scheme= HTTPBearer()
 def create_access_token(user_id: int)-> str:
     now= datetime.now(timezone.utc)
 
@@ -42,7 +44,7 @@ def create_access_token(user_id: int)-> str:
     )
 
 def get_current_user(
-        token: str= Depends(oauth2_scheme),
+        credentials: HTTPAuthorizationCredentials=Depends(bearer_scheme),
         db: Session= Depends(get_db),
 )-> User: 
     credentials_exception= HTTPException(
@@ -50,6 +52,26 @@ def get_current_user(
         detail= "Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    try: 
+        payload=jwt.decode(
+            credentials.credentials, 
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+        user_id=payload.get("sub")
+
+        if user_id is None:
+            raise credentials_exception
+
+        user= db.get(User, int(user_id))
+
+    except (InvalidTokenError, ValueError):
+        raise credentials_exception
+
+    if user is None: 
+        raise credentials_exception
+
+    return user
 app= FastAPI(
     title= "Wahala Board Api",
     description="A place to settle everyday debates",
@@ -95,7 +117,7 @@ def register_user(user: UserCreate, db: Session= Depends(get_db)):
     if existing_user:
         raise HTTPException(
             status_code=409,
-            details="Email or username is already registered"
+            detail="Email or username is already registered"
         )
     new_user=User(
         username=user.username.strip(),
@@ -140,9 +162,20 @@ def login_user(
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     }
+
+@app.get("/api/v1/auth/me")
+def Get_me( current_user: User= Depends(get_current_user),):
+    return{
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+    }
 @app.post("/api/v1/polls", status_code= 201)
-def create_poll(poll:PollCreate, db: Session= Depends(get_db)):
-    new_poll=Poll(question=poll.question)
+def create_poll(poll:PollCreate, db: Session= Depends(get_db), current_user: User = Depends(get_current_user),):
+    new_poll=Poll(
+        question=poll.question,
+        userId=current_user.id
+    )
 
     new_poll.options=[
         PollOption(text=option)
@@ -158,6 +191,10 @@ def create_poll(poll:PollCreate, db: Session= Depends(get_db)):
             {"id": option.id, "text": option.text}
             for option in new_poll.options
         ],
+        "created_by": {
+            "id": current_user.id,
+            "username": current_user.username,
+        },
     }
 
 
